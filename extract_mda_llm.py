@@ -15,7 +15,7 @@ ERROR_LOG_FILE = os.path.join(OUTPUT_FOLDER, "extraction_errors.json")
 # API Configuration
 # Replace these with your actual API keys and URL
 API_KEYS = [
-    "sk-fxtczrxvvtxozyfywwbrmdneqtwgkplggvjlbvcbjzirivdw",
+    "XXXXXXXX",
 ]
 API_URL = "https://api.siliconflow.cn/v1" # Example: OpenAI Endpoint
 MODEL_NAME = "Pro/deepseek-ai/DeepSeek-V3.2" # Example Model
