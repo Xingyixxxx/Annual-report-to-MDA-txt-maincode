@@ -15,11 +15,7 @@ ERROR_LOG_FILE = os.path.join(OUTPUT_FOLDER, "extraction_errors.json")
 # API Configuration
 # Replace these with your actual API keys and URL
 API_KEYS = [
-<<<<<<< HEAD
     "XXXXXXXX",
-=======
-    "sk-fxtczrxvvtxozyfywwbrmdneqtwgkplggvjlbvcbjzirivdw",
->>>>>>> b753144 (feat: 实现使用LLM从年度报告中提取管理层讨论与分析(MDA)部分的功能，支持PDF文本高级清洗、两阶段扫描及API限流。)
 ]
 API_URL = "https://api.siliconflow.cn/v1" # Example: OpenAI Endpoint
 MODEL_NAME = "Pro/deepseek-ai/DeepSeek-V3.2" # Example Model
