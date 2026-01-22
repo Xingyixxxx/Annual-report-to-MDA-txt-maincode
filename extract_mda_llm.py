@@ -15,7 +15,7 @@ ERROR_LOG_FILE = os.path.join(OUTPUT_FOLDER, "extraction_errors.json")
 # API Configuration
 # Replace these with your actual API keys and URL
 API_KEYS = [
-    "XXXXXXXX",
+    "XXXXXXXXXXXX",
 ]
 API_URL = "https://api.siliconflow.cn/v1" # Example: OpenAI Endpoint
 MODEL_NAME = "Pro/deepseek-ai/DeepSeek-V3.2" # Example Model
@@ -87,10 +87,13 @@ def extract_text_for_content(page, aggressive_crop=True):
     text = remove_duplicate_chars(text) # Always dedup content
     return text
 
-def read_pdf_pages(pdf_path, start_page=1, end_page=50):
+def read_pdf_pages(pdf_path, start_page=1, end_page=50, add_markers=False):
     """
     Reads text from specific pages of a PDF using advanced cleaning.
     Pages are 1-indexed.
+    
+    Args:
+        add_markers (bool): If True, adds "「{page_num}」" at the start of each page's text.
     """
     text_content = []
     try:
@@ -98,9 +101,19 @@ def read_pdf_pages(pdf_path, start_page=1, end_page=50):
             total_pages = len(pdf.pages)
             for i in range(start_page - 1, min(end_page, total_pages)):
                 page = pdf.pages[i]
+                current_page_num = i + 1
+                
                 # Use the robust extraction function
                 page_text = extract_text_for_content(page)
-                text_content.append(page_text)
+                
+                if add_markers:
+                    # Add marker at the beginning of the page content
+                    # Format: 「1」\nContent...
+                    marked_text = f"「{current_page_num}」\n{page_text}"
+                    text_content.append(marked_text)
+                else:
+                    text_content.append(page_text)
+                    
     except Exception as e:
         print(f"Error reading PDF {pdf_path}: {e}")
         return None
@@ -144,29 +157,32 @@ api_manager = APIKeyManager(API_KEYS, REQUESTS_PER_MINUTE)
 
 def call_llm_api(file_name, pdf_text):
     """
-    Calls the LLM API to identify MDA section coordinates.
+    Calls the LLM API to identify MDA section coordinates from the Table of Contents.
     """
     prompt = f"""
-请帮我在以下A股公司年报中定位"管理层讨论与分析"(MDA)部分的精确位置。
-这部分标题可能是："管理层讨论与分析|董事会报告|董事会工作报告|董事局报告|经营情况讨论与分析等。可能是繁体字。
-
-请严格按照以下格式返回位置信息:
+请阅读以下A股公司年报的前20页内容（包含目录）。
+你的任务是：
+1. 在目录中找到"管理层讨论与分析"（或类似标题，如"董事会报告"、"经营情况讨论与分析"）的章节，提取目录中显示的开始页码和结束页码。
+2. 计算"目录页码"与"PDF真实页码"之间的差值 (page_offset)。
+   计算原理：文本中每一页的开头都有标记「页码」（例如「5」表示这是PDF的第5页）。
+   请找出一个在目录中也出现的章节（如"公司简介"或"管理层讨论与分析"本身），对比其"目录显示的页码"与"文本中标记的真实页码"。
+   公式：page_offset = 真实页码 - 目录页码。
+   
+请严格按照以下JSON格式返回，不要包含其他解释：
 {{
-  "start_page": 数字(第几页开始，1-based),
-  "end_page": 数字(第几页结束，1-based),
-  "start_keyword": "找到的标题完整文本",
-  "confidence": 0.0到1.0之间的数值，表示对结果的置信度
+  "start_page": 目录显示的开始页码 (int),
+  "end_page": 目录显示的结束页码 (int),
+  "page_offset": 计算出的差值 (int),
+  "start_keyword": "找到的目录标题文本",
+  "reasoning": "计算差值的依据简述(例如: 目录说公司简介在第4页，但标记显示在第6页)"
 }}
-
-只返回上述格式的位置信息JSON，不要添加其他内容。
 
 文件名: {file_name}
 
-年报文本:
-{pdf_text[:100000]} 
+前20页文本 (含真实页码标记):
+{pdf_text} 
 """ 
-# Note: Truncating text to avoid hitting context limits blindly, though 50 pages should fit in 128k context models.
-# Adjust per model capability.
+# Note: Text should already be truncated/selected before calling this.
 
     api_manager.wait_for_rate_limit()
     key = api_manager.get_key()
@@ -183,10 +199,10 @@ def call_llm_api(file_name, pdf_text):
             {"role": "user", "content": prompt}
         ],
         "temperature": 0.0,
-        "response_format": {"type": "json_object"} # Useful for newer OpenAI models
+        "response_format": {"type": "json_object"} 
     }
 
-    # Handle API URL appending (User often provides base URL)
+    # Handle API URL appending
     endpoint = API_URL
     if not endpoint.endswith("/chat/completions"):
         endpoint = endpoint.rstrip("/") + "/chat/completions"
@@ -207,67 +223,47 @@ def process_file(file_path):
     file_name = os.path.basename(file_path)
     print(f"Processing: {file_name}")
     
-    # --- Stage 1: Fast Scan (Page 1-50) ---
-    print(f"  -> Stage 1: Scanning pages 1-50...")
-    # read_pdf_pages now already returns cleaned, deduped text
-    cleaned_text_s1 = read_pdf_pages(file_path, 1, 50)
-    if not cleaned_text_s1:
+    # --- Only One Stage: Read TOC (Pages 1-20) ---
+    print(f"  -> Reading pages 1-20 to find Directory and Calculate Offset...")
+    
+    # Enable explicit page markers
+    cleaned_text = read_pdf_pages(file_path, 1, 20, add_markers=True)
+    
+    if not cleaned_text:
         return {"file": file_name, "error": "Empty or unreadable PDF"}
         
-    location_data = call_llm_api(file_name, cleaned_text_s1)
-    
-    # Decision Logic for Stage 2
-    need_retry = False
+    location_data = call_llm_api(file_name, cleaned_text)
     
     if not location_data:
-        # API fail or empty -> Retry might help if it was a context issue? Unlikely, but if LLM said specific error maybe. 
-        # But if just None, maybe we leave it.
-        need_retry = True
-    else:
-        start_page = location_data.get("start_page")
-        end_page = location_data.get("end_page")
+        return {"file": file_name, "error": "LLM extraction failed"}
         
-        # Condition A: Not found at all
-        if not start_page or not end_page:
-            print(f"  -> Stage 1 inconclusive (Start: {start_page}, End: {end_page}). Preparing Stage 2...")
-            need_retry = True
+    start_page_doc = location_data.get("start_page")
+    end_page_doc = location_data.get("end_page")
+    offset = location_data.get("page_offset", 0)
+    
+    if not start_page_doc: # end_page might be None if implicit
+        return {"file": file_name, "error": "Could not find MDA in Directory", "raw_response": location_data}
         
-        # Condition B: Found, but ends dangerously close to cutoff (e.g. > 45)
-        # This implies it might be truncated in reality, LLM just guessed the last visible page.
-        elif end_page >= 45:
-            print(f"  -> Stage 1 result near cutoff (Ends at {end_page}). Extending scan...")
-            need_retry = True
-            
-        else:
-            print(f"  -> Stage 1 Success: MDA found at {start_page}-{end_page}")
-
-    # --- Stage 2: Deep Scan (Page 1-150) if needed ---
-    if need_retry:
-        print(f"  -> Stage 2: Scanning pages 1-150...")
-        # Re-read with larger window
-        cleaned_text_s2 = read_pdf_pages(file_path, 1, 150)
-        
-        # Call API again
-        location_data = call_llm_api(file_name, cleaned_text_s2)
-        
-        if not location_data:
-             return {"file": file_name, "error": "API extraction failed after Stage 2"}
-             
-        start_page = location_data.get("start_page")
-        end_page = location_data.get("end_page")
-        
-        if not start_page or not end_page:
-             return {"file": file_name, "error": "Could not locate MDA (start/end missing) even in 150 pages", "raw_response": location_data}
-             
-        print(f"  -> Stage 2 Result: MDA found at {start_page}-{end_page}")
+    # Calculate Actual Pages
+    # Result = DocPage + Offset
+    # Note: Sometimes offset can be negative? Usually Positive (PDF starts with covers).
+    # If offset is None, assume 0.
+    if offset is None: offset = 0
+    
+    actual_start = int(start_page_doc + offset)
+    actual_end = int(end_page_doc + offset) if end_page_doc else int(actual_start + 50) # Fail safe 50 pages if no end
+    
+    print(f"  -> Found in Directory: {start_page_doc}-{end_page_doc} | Offset: {offset}")
+    print(f"  -> Actual Extraction Range: {actual_start}-{actual_end}")
 
     # --- Extraction Phase ---
     try:
         final_text = []
         with pdfplumber.open(file_path) as pdf:
             total_pages = len(pdf.pages)
-            start_idx = max(0, start_page - 1)
-            end_idx = min(total_pages, end_page) 
+            # Use calculated actual pages
+            start_idx = max(0, actual_start - 1)
+            end_idx = min(total_pages, actual_end) 
             
             for i in range(start_idx, end_idx):
                 page = pdf.pages[i]
